@@ -1,0 +1,5 @@
+author: "Vlad Ki <proger@wilab.org.ua>"
+category: "service"
+summary: "Forward incoming messages from a HTTP endpoint"
+home: "https://github.com/proger/mod_trunk"
+url: "https://github.com/proger/mod_trunk"
