@@ -6,7 +6,8 @@
 -export([start/2, stop/1, depends/2, mod_opt_type/1,
          read_config/1,
          process/2,
-         health/0]).
+         health/0,
+         register_alias/2, unregister_alias/1, all_aliases/0]).
 
 -include("logger.hrl").
 -include("xmpp.hrl").
@@ -16,28 +17,28 @@
 
 -record(trunk_alias, {alias :: binary(), bare_jid :: bare_jid()}).
 
--record(config, {host :: binary(),
-                 src_host :: binary(),
+-record(config, {src_host :: binary(),
                  token :: binary()}).
 
 %%% routing
 
-sms_to_xmpp({Src, Dst, Text, Timestamp}, #config{src_host=SrcHost}) ->
+sms_to_xmpp({Src, Dst, Text, _Timestamp} = M, #config{src_host=SrcHost}) ->
     case alias_to_jid(Dst) of
         {ok, To} ->
+            ?DEBUG("mod_trunk wants to route: ~p to ~p~n", [M, To]),
             Pkt0 = #message{from=jid:make(Src, SrcHost),
                             to=To,
                             body=xmpp:mk_text(Text)},
-            Pkt1 = xmpp:put_meta(Pkt0, sms, true),
-            Pkt2 =
-                try
-                    xmpp_util:add_delay_info(Pkt1, jid:make(SrcHost), Timestamp, <<"SMS Trunk">>)
-                catch
-                    error:function_clause ->
-                        ?ERROR_MSG("sms_to_xmpp: bad timestamp: ~p~n", [{Src, Dst, Timestamp}]),
-                        Pkt1
-                end,
-            {ok, Pkt2};
+            {ok, Pkt0};
+            %% Pkt1 =
+            %%     try
+            %%         xmpp_util:add_delay_info(Pkt0, jid:make(SrcHost), Timestamp, <<"SMS Trunk">>)
+            %%     catch
+            %%         error:function_clause ->
+            %%             ?ERROR_MSG("sms_to_xmpp: bad timestamp: ~p~n", [{Src, Dst, Timestamp}]),
+            %%             Pkt0
+            %%     end,
+            %% {ok, Pkt1};
         unregistered ->
             throw(unregistered);
         {error, E} ->
@@ -47,45 +48,39 @@ sms_to_xmpp({Src, Dst, Text, Timestamp}, #config{src_host=SrcHost}) ->
 %%% config
 
 config(Host) ->
-    read_config(
-      gen_mod:get_module_opt(Host, ?MODULE, backends,
-                             fun(O) when is_list(O) -> O end,
-                             []),
-      Host).
+    gen_mod:get_module_opt(Host, ?MODULE, config).
 
 read_config(Proplist) ->
     #config{src_host=proplists:get_value(src_host, Proplist, <<"sms">>),
             token=proplists:get_value(token, Proplist, <<"token">>)}.
-
-read_config(Proplist, Host) ->
-    Config = read_config(Proplist),
-    Config#config{host=Host}.
 
 %%% mnesia
 
 -define(RECORD(X), {X, record_info(fields, X)}).
 
 mnesia_set_from_record({Name, Fields}) ->
-    mnesia:create_table(Name,
-                        [{disc_copies, [node()]},
-                         {type, set},
-                         {attributes, Fields}]),
+    TabDef = [{disc_copies, [node()]}, {type, set}, {attributes, Fields}],
+    case mnesia:create_table(Name, TabDef) of
+        {aborted,{already_exists,Name}} -> ok;
+        {atomic, ok} -> ok
+    end,
 
     case mnesia:table_info(Name, attributes) of
         Fields -> ok;
         _ -> mnesia:transform_table(Name, ignore, Fields)
     end.
 
+all_aliases() ->
+    mnesia:dirty_select(trunk_alias, [{'_',[],['$_']}]).
+
 register_alias(Alias, #jid{luser = LUser, lserver = LServer}) ->
-    F = fun() ->
-                mnesia:write(#trunk_alias{alias=Alias, bare_jid={LUser, LServer}})
-        end,
-    mnesia:transaction(F).
+    F = fun() -> mnesia:write(#trunk_alias{alias=Alias, bare_jid={LUser, LServer}}) end,
+    mnesia:transaction(F);
+register_alias(Alias, BinaryJID) ->
+    register_alias(Alias, jid:decode(BinaryJID)).
 
 unregister_alias(Alias) ->
-    F = fun() ->
-                mnesia:delete({trunk_alias, Alias})
-        end,
+    F = fun() -> mnesia:delete({trunk_alias, Alias}) end,
     mnesia:transaction(F).
 
 alias_to_jid(Alias) ->
@@ -109,9 +104,9 @@ depends(_Host, _Opts) -> [].
 
 %%% ejabberd_http
 
-process([] , #request{method='POST', data=Data, host=Host, ip=_ClientIp}) ->
+process([] , #request{method='POST', data=Data, host=_Host, ip=_ClientIp}) ->
     try
-        Config = config(Host),
+        Config = config(global),
         M1 = read_input(Data),
         M2 = check_strip_token(M1, Config),
         {ok, Pkt} = sms_to_xmpp(M2, Config),
@@ -119,23 +114,36 @@ process([] , #request{method='POST', data=Data, host=Host, ip=_ClientIp}) ->
         {200, [], <<"">>}
     catch
         throw:{error,{_,invalid_json}} = R ->
-            ?DEBUG("invalid_json: ~p~n", [[{data, Data}, {error, R}]]),
-            {400, [], <<"Malformed JSON">>};
+            ?DEBUG("invalid_json: ~p~n", [[{binary, Data}, {error, R}]]),
+            {400, [], <<"Malformed JSON\n">>};
         throw:{bad_json, _} = R ->
-            ?DEBUG("bad_json: ~p~n", [[{data, Data}, {error, R}]]),
-            {400, [], <<"Unexpected JSON">>};
+            ?DEBUG("bad_json: ~p~n", [[try_read_input(Data), {error, R}]]),
+            {400, [], <<"Unexpected JSON\n">>};
         throw:{token_mismatch, _} = R ->
-            ?DEBUG("token_mismatch: ~p~n", [[{data, Data}, {error, R}]]),
-            {401, [], <<"Token mismatch">>};
+            ?DEBUG("token_mismatch: ~p~n", [[try_read_input(Data), {error, R}]]),
+            {401, [], <<"Token mismatch\n">>};
         throw:unregistered ->
-            ?ERROR_MSG("unregistered alias: ~p~n", [[{data, Data}]]);
+            case try_read_input(Data) of
+                {json, #{<<"dst">> := Dst} = M} ->
+                    ?INFO_MSG("mod_trunk: unknown dst alias. use `~p:register_alias(~p, <<\"jid@localhost\">>).` to register. original message: ~p~n", [?MODULE, Dst, M]);
+                Other ->
+                    ?ERROR_MSG("mod_trunk: unregistered alias: ~p~n", [Other])
+            end,
+            {404, [], <<"">>};
         E:R ->
-            ?ERROR_MSG("failed to route trunk: ~p~n", [[{data, Data}, {error, {E, R}}]]),
+            ?ERROR_MSG("mod_trunk error: ~p~n", [[{error, {E, R}}, try_read_input(Data)]]),
             {500, [], <<"">>}
     end;
 process(Path, Request) ->
     ?DEBUG("stray request: ~p~n", [{Path, Request}]),
     {405, [], <<"">>}.
+
+try_read_input(Data) ->
+    try
+        {json, jiffy:decode(Data, [return_maps])}
+    catch
+        _:_ -> {binary, Data}
+    end.
 
 read_input(Data) ->
     case jiffy:decode(Data, [return_maps]) of
@@ -157,7 +165,8 @@ check_strip_token({_, _, _, _, T1}, #config{token=T2}) ->
 
 health() ->
     Hosts = ejabberd_config:get_myhosts(),
-    {[config(H) || H <- Hosts]}.
+    [{config, [{H, config(H)} || H <- Hosts]},
+     {aliases, mnesia:table_info(trunk_alias, size)}].
 
 test() ->
     ejabberd_router:route(#message{from=jid:make(<<"alice">>, <<"localhost">>),
