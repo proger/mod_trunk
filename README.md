@@ -55,8 +55,10 @@ modules:
 Configure `mod_trunk` aliases:
 
 ```erlang
+% Register aliases in mnesia:
 mod_trunk:register_alias(<<"+14085503542">>, <<"john@localhost">>).
 
+% List all registered aliases:
 mod_trunk:all_aliases().
 ```
 
@@ -75,10 +77,10 @@ curl -v --cacert /etc/ssl/certs/ca-bundle.pem https://localhost:5444/trunk -d '
 
 ## Operation Notes
 
-```
-# Module information:
+```erlang
+% Module information:
 mod_trunk:health().
 
-# Divert logs:
+% Divert logs:
 lager:trace_file("/tmp/mod_trunk.log", [{module, mod_trunk}], debug).
 ```
