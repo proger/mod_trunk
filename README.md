@@ -24,7 +24,7 @@ ejabberdctl module_upgrade mod_trunk
 
 ## Configuration
 
-Merge the following into your `ejabberd.yml`. TLS configuration is optional.
+Merge the following into your `ejabberd.yml`. TLS configuration is optional. You may use [openssl-make-ca](https://github.com/proger/openssl-make-ca) to test with your own CA.
 
 ```yaml
 certfiles:
