@@ -60,15 +60,7 @@ read_config(Proplist) ->
 
 mnesia_set_from_record({Name, Fields}) ->
     TabDef = [{disc_copies, [node()]}, {type, set}, {attributes, Fields}],
-    case mnesia:create_table(Name, TabDef) of
-        {aborted,{already_exists,Name}} -> ok;
-        {atomic, ok} -> ok
-    end,
-
-    case mnesia:table_info(Name, attributes) of
-        Fields -> ok;
-        _ -> mnesia:transform_table(Name, ignore, Fields)
-    end.
+    ejabberd_mnesia:create(?MODULE, Name, TabDef).
 
 all_aliases() ->
     mnesia:dirty_select(trunk_alias, [{'_',[],['$_']}]).
@@ -149,9 +141,13 @@ read_input(Data) ->
     case jiffy:decode(Data, [return_maps]) of
         #{<<"src">> := Src,
           <<"dst">> := Dst,
-          <<"text">> := Text,
+          <<"text">> := PreText,
           <<"ts">> := Timestamp,
           <<"token">> := Token} ->
+            Text = case catch base64:decode(PreText) of
+                {'EXIT', _} -> PreText;
+                T -> T
+            end,
             {Src, Dst, Text, Timestamp, Token};
         Other -> throw({bad_json, Other})
     end.
